@@ -69,7 +69,7 @@ def fetch_tags_page(namespace, repo_name, base_url, username, token,
 
 
 def get_tags_for_repository(namespace, repo_name, base_url, username,
-                            token, pagesize):
+                            token, pagesize, workers):
     unique_layers = set()
     repo_total_size = 0
     total_tags = 0
@@ -78,7 +78,7 @@ def get_tags_for_repository(namespace, repo_name, base_url, username,
 
     print(f"Fetching tags for repository: {repo_name}...", end='', flush=True)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         while next_pages:
             logging.debug(f"Next pages to process: {next_pages}")
 
@@ -133,6 +133,7 @@ def main(args):
     USERNAME = args.username
     TOKEN = args.token
     PAGESIZE = args.pagesize
+    WORKERS = args.workers
     
     repositories, total_repos = list_repositories(BASE_URL, USERNAME, TOKEN)
 
@@ -143,7 +144,8 @@ def main(args):
         namespace = repo['namespace']
         repo_name = repo['name']
         repo_size = get_tags_for_repository(namespace, repo_name, 
-                                            BASE_URL, USERNAME, TOKEN, PAGESIZE)
+                                            BASE_URL, USERNAME, TOKEN, PAGESIZE,
+                                            WORKERS)
         overall_total_size += repo_size
 
     print(f"\nOverall total size of all repositories: "
@@ -174,6 +176,9 @@ if __name__ == "__main__":
 
     parser.add_argument('-k', '--insecure', action='store_true',
                         help='Ignore SSL certificate verification.')
+
+    parser.add_argument('--workers', type=int, default=5,
+                    help='Number of worker threads for fetching tags.')
 
     args = parser.parse_args()
 

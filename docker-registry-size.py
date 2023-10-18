@@ -138,7 +138,6 @@ def main(args):
 
     print(f"\nTotal number of repositories: {total_repos}")
 
-
     overall_total_size = 0
     for repo in repositories:
         namespace = repo['namespace']
@@ -175,7 +174,6 @@ if __name__ == "__main__":
 
     parser.add_argument('-k', '--insecure', action='store_true',
                         help='Ignore SSL certificate verification.')
-
 
     args = parser.parse_args()
 

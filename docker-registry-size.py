@@ -1,8 +1,11 @@
-import requests
 import concurrent.futures
 import logging
 import sys
 import argparse
+import requests
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 HEADERS = {
     "accept": "application/json",
@@ -20,7 +23,8 @@ def human_readable_size(size, decimal_places=2):
 
 def list_repositories(base_url, username, token):
     response = requests.get(f"{base_url}/repositories", headers=HEADERS,
-                            auth=(username, token))
+                            auth=(username, token), verify=not args.insecure,
+                            timeout=5)
     
     if response.status_code != 200:
         logging.error(f"Error fetching repositories: {response.text}")
@@ -31,13 +35,15 @@ def list_repositories(base_url, username, token):
         logging.info(f"Repository ID: {repo['id']}, Name: {repo['name']}, "
                      f"Namespace: {repo['namespace']}")
 
-    return repos
+    total_repos = len(repos)  
+
+    return repos, total_repos
 
 
 def fetch_tags_page(namespace, repo_name, base_url, username, token,
-                    page_start=None):
+                    page_start=None, pagesize=100):
     params = {
-        "pageSize": 100,
+        "pageSize": pagesize,
         "count": True,
         "includeManifests": True
     }
@@ -46,7 +52,8 @@ def fetch_tags_page(namespace, repo_name, base_url, username, token,
 
     url = f"{base_url}/repositories/{namespace}/{repo_name}/tags"
     response = requests.get(url, headers=HEADERS, auth=(username, token),
-                            params=params)
+                            params=params, verify=not args.insecure,
+                            timeout=5)
     
     # Extract the next page start from the headers
     next_page_start = response.headers.get('X-Next-Page-Start')
@@ -61,7 +68,8 @@ def fetch_tags_page(namespace, repo_name, base_url, username, token,
         return [], next_page_start   
 
 
-def get_tags_for_repository(namespace, repo_name, base_url, username, token):
+def get_tags_for_repository(namespace, repo_name, base_url, username,
+                            token, pagesize):
     unique_layers = set()
     repo_total_size = 0
     total_tags = 0
@@ -77,7 +85,7 @@ def get_tags_for_repository(namespace, repo_name, base_url, username, token):
             # Only submit new pages that haven't been processed
             future_to_page = {executor.submit(fetch_tags_page, namespace, 
                                                 repo_name, base_url, username,
-                                                token, page_start):
+                                                token, page_start, pagesize):
                                         page_start for page_start in next_pages}
             next_pages = []
 
@@ -124,14 +132,19 @@ def main(args):
     BASE_URL = f"{args.url.rstrip('/')}/api/v0"
     USERNAME = args.username
     TOKEN = args.token
+    PAGESIZE = args.pagesize
     
-    repositories = list_repositories(BASE_URL, USERNAME, TOKEN)
+    repositories, total_repos = list_repositories(BASE_URL, USERNAME, TOKEN)
+
+    print(f"\nTotal number of repositories: {total_repos}")
+
+
     overall_total_size = 0
     for repo in repositories:
         namespace = repo['namespace']
         repo_name = repo['name']
         repo_size = get_tags_for_repository(namespace, repo_name, 
-                                            BASE_URL, USERNAME, TOKEN)
+                                            BASE_URL, USERNAME, TOKEN, PAGESIZE)
         overall_total_size += repo_size
 
     print(f"\nOverall total size of all repositories: "
@@ -145,10 +158,10 @@ if __name__ == "__main__":
     parser.add_argument('--url', required=True, 
                         help='Base URL of the Docker registry API.')
 
-    parser.add_argument('--username', required=True, 
+    parser.add_argument('-u', '--username', required=True, 
                         help='Username for authentication.')
 
-    parser.add_argument('--token', required=True, 
+    parser.add_argument('-t', '--token', required=True, 
                         help='Token for authentication.')
 
     parser.add_argument('--trace-level', 
@@ -156,6 +169,13 @@ if __name__ == "__main__":
                                  'CRITICAL'],
                         default='WARNING', 
                         help='Logging level.')
+
+    parser.add_argument('--pagesize', type=int, default=100,
+                        help='Number of tags fetched per request.')
+
+    parser.add_argument('-k', '--insecure', action='store_true',
+                        help='Ignore SSL certificate verification.')
+
 
     args = parser.parse_args()
 

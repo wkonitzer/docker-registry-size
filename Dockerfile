@@ -18,4 +18,4 @@ COPY registry_size_server.py ./registry_size_server.py
 EXPOSE 8000
 
 # Run registry_size_server.py when the container launches
-CMD ["gunicorn", "registry_size_server:app", "-b", "0.0.0.0:8000", "-w", "1", --timeout", "300"]
+CMD ["gunicorn", "registry_size_server:app", "-b", "0.0.0.0:8000", "-w", "1", "--timeout", "300"]

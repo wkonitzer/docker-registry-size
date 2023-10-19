@@ -25,7 +25,7 @@ spec:
         - name: DOCKER_REGISTRY_URL
           value: "https://msr.ci.mirantis.com"
         - name: SCHEDULER_INTERVAL
-          value: 360
+          value: "360"
         - name: DOCKER_REGISTRY_USERNAME
           valueFrom:
             secretKeyRef:

@@ -246,6 +246,10 @@ def get_tags_for_repository(namespace, repo_name, base_url, username,
                             "application/vnd.oci.image.index.v1+json"
                         )
                         if media_type == oci_media_type:
+                            logging.debug(
+                                f"Handling OCI for registry: {repo_name}, "
+                                f"namespace: {namespace}"
+                            )
                             manifests = tag['manifest'].get('manifests', [])
                             for manifest in manifests:
 

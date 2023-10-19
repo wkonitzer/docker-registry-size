@@ -18,4 +18,4 @@ COPY registry_size_server.py ./registry_size_server.py
 EXPOSE 8000
 
 # Run registry_size_server.py when the container launches
-CMD ["gunicorn", "-b", "0.0.0.0:8000", "registry_size_server:app", "--access-logfile", "-", "--access-logformat", "%({X-Forwarded-For}i)s %(h)s - - [%(t)s] \"%(r)s\" %(s)s -"]
+CMD ["gunicorn", "-b", "0.0.0.0:8000", "-w", "4", "--worker-class", "gthread", "--threads", "4", "--timeout", "300", "registry_size_server:app", "--access-logfile", "-", "--access-logformat", "%({X-Forwarded-For}i)s %(h)s - - [%(t)s] \"%(r)s\" %(s)s -"]

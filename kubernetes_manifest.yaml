@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: msr-storage-metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: msr-storage-metrics-deployment
+  namespace: msr-storage-metrics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: msr-storage-metrics-server
+  template:
+    metadata:
+      labels:
+        app: msr-storage-metrics-server
+    spec:
+      containers:
+      - name: msr-storage-metrics-server
+        image: msr2.konitzer.dev/wkonitzer/msr-storage-metrics-server:latest
+        env:
+#        - name: LOGGING_LEVEL
+#          value: "DEBUG"  
+#        - name: FLASK_DEBUG
+#          value: "True"        
+        ports:
+        - containerPort: 8000
+        resources:
+          requests:
+            cpu: "10m"
+            memory: "50Mi"
+          limits:
+            memory: "100Mi"
+        livenessProbe:
+          httpGet:
+            path: /health 
+            port: 8000
+          initialDelaySeconds: 30 
+          periodSeconds: 10 
+        readinessProbe:
+          httpGet:
+            path: /health 
+            port: 8000
+          initialDelaySeconds: 5 
+          periodSeconds: 5                   
+      imagePullSecrets:
+      - name: my-registry-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: msr-storage-metrics-service
+  namespace: msr-storage-metrics
+spec:
+  selector:
+    app: msr-storage-metrics-server
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rss-server-ingress
+  namespace: msr-storage-metrics
+  annotations:
+    kubernetes.io/ingress.class: caddy
+    caddy.ingress.kubernetes.io/rewrite-to: /mstrics # Map / to /metrics
+spec:
+  rules:
+  - host: msr-storage-metrics.konitzer.dev
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: msr-storage-metrics-service
+            port:
+              number: 80

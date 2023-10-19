@@ -7,6 +7,7 @@ import argparse
 import signal
 import requests
 import csv
+import json
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from requests.exceptions import ReadTimeout
 
@@ -41,7 +42,7 @@ def human_readable_size(size, decimal_places=2):
 
 
 def fetch_page(base_url, username, token, pagesize, page_start=None,
-                return_headers=False):
+                return_headers=False, insecure=False):
     params = {
         "pageSize": pagesize,
         "count": True,
@@ -53,28 +54,35 @@ def fetch_page(base_url, username, token, pagesize, page_start=None,
     try:
         response = requests.get(f"{base_url}/repositories", headers=HEADERS,
                                 auth=(username, token),
-                                verify=not args.insecure, timeout=5,
+                                verify=not insecure, timeout=5,
                                 params=params)
         # Raise an HTTPError if the HTTP request returned an unsuccessful
         # status code
         response.raise_for_status()
-    except requests.RequestException as e:
-        logging.error(f"Error fetching repositories: {e}")
-        return []
+    except requests.RequestException as error:
+        logging.error(f"Error fetching repositories: {error}")
+        return [], {} # Return an empty list and an empty dictionary
 
-    if return_headers:
-        return response.json().get("repositories", []), response.headers
-    return response.json().get("repositories", [])
+    try:
+        if return_headers:
+            return response.json().get("repositories", []), response.headers
+        return response.json().get("repositories", [])
+    except json.decoder.JSONDecodeError:
+        # Log the error and return the raw response for inspection
+        logging.error(f"Failed to decode JSON. Response body: {response.text}")
+        # Return an empty list and the response headers
+        return [], response.headers
 
 
-def list_repositories(base_url, username, token, pagesize, workers):
+def list_repositories(base_url, username, token, pagesize, workers, insecure):
     repos = []
 
     print(f"Fetching count of repositories", end='', flush=True)
 
     # Fetch the first page to get started
     repos_first_page, first_response_headers = fetch_page(base_url, username,
-                                        token, pagesize, return_headers=True)
+                                        token, pagesize, return_headers=True,
+                                        insecure=insecure)
     repos.extend(repos_first_page)
 
     # Get the X-Resource-Count from the first request
@@ -86,7 +94,8 @@ def list_repositories(base_url, username, token, pagesize, workers):
         page_repos, next_page_headers = fetch_page(base_url, username, token, 
                                                    pagesize,
                                                    page_start=next_page_start,
-                                                   return_headers=True)
+                                                   return_headers=True,
+                                                   insecure=insecure)
         
         if not page_repos:
             break  # Break if we get an empty page, indicating no more data
@@ -110,7 +119,8 @@ def list_repositories(base_url, username, token, pagesize, workers):
 
 
 def fetch_tags_page(namespace, repo_name, base_url, username, token,
-                    page_start=None, pagesize=100, return_headers=False):
+                    page_start=None, pagesize=100, return_headers=False,
+                    insecure=False):
     params = {
         "pageSize": pagesize,
         "count": True,
@@ -124,7 +134,7 @@ def fetch_tags_page(namespace, repo_name, base_url, username, token,
 
     try:
         response = requests.get(url, headers=HEADERS, auth=(username, token),
-                                params=params, verify=not args.insecure,
+                                params=params, verify=not insecure,
                                 timeout=5)
         
         # Extract the next page start from the headers
@@ -143,7 +153,7 @@ def fetch_tags_page(namespace, repo_name, base_url, username, token,
 
         tags = response.json()
         for tag in tags:
-            logging.info(f"Collected tag for {repo_name}: {tag['name']}")            
+            logging.debug(f"Collected tag for {repo_name}: {tag['name']}")            
         
         # Return both the tags and the next page start value
         if return_headers:
@@ -178,7 +188,7 @@ def process_manifest(tag):
 
 
 def get_tags_for_repository(namespace, repo_name, base_url, username,
-                            token, pagesize, workers):
+                            token, pagesize, workers, insecure):
     unique_layers = set()
     repo_total_size = 0
     total_tags = 0
@@ -203,7 +213,8 @@ def get_tags_for_repository(namespace, repo_name, base_url, username,
                                                     repo_name, base_url,
                                                     username, token, page_start,
                                                     pagesize,
-                                                    return_headers=first_page):
+                                                    return_headers=first_page,
+                                                    insecure=insecure):
                                         page_start for page_start in next_pages}
                 next_pages = []
 
@@ -321,12 +332,13 @@ def main(args):
     PAGESIZE = args.pagesize
     WORKERS = args.workers
     REPO = args.repo
+    INSECURE = args.insecure
 
     # Initialize a list to store repository details
     repo_details = []    
     
     repositories, total_repos = list_repositories(BASE_URL, USERNAME, TOKEN,
-                                                  PAGESIZE, WORKERS)
+                                                  PAGESIZE, WORKERS, INSECURE)
 
     if REPO:
         repositories = [repo for repo in repositories if repo['name'] == REPO]
@@ -345,7 +357,7 @@ def main(args):
         future_to_repo = {executor.submit(get_tags_for_repository, 
                                           repo['namespace'], repo['name'],
                                           BASE_URL, USERNAME, TOKEN, PAGESIZE, 
-                              min(10, WORKERS)): repo for repo in repositories}
+                    min(10, WORKERS), INSECURE): repo for repo in repositories}
 
         for future in concurrent.futures.as_completed(future_to_repo):
             repo_size, tag_count, repo_output = future.result()

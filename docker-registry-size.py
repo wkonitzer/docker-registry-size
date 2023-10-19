@@ -21,21 +21,67 @@ def human_readable_size(size, decimal_places=2):
     return f"{size:.{decimal_places}f} {unit}"
 
 
-def list_repositories(base_url, username, token):
-    response = requests.get(f"{base_url}/repositories", headers=HEADERS,
-                            auth=(username, token), verify=not args.insecure,
-                            timeout=5)
-    
-    if response.status_code != 200:
-        logging.error(f"Error fetching repositories: {response.text}")
+def fetch_page(base_url, username, token, pagesize, page_start=None,
+                return_headers=False):
+    params = {
+        "pageSize": pagesize,
+        "count": True,
+    }
+
+    if page_start:
+        params["pageStart"] = page_start
+
+    try:
+        response = requests.get(f"{base_url}/repositories", headers=HEADERS,
+                                auth=(username, token),
+                                verify=not args.insecure, timeout=5,
+                                params=params)
+        # Raise an HTTPError if the HTTP request returned an unsuccessful
+        # status code
+        response.raise_for_status()
+    except requests.RequestException as e:
+        logging.error(f"Error fetching repositories: {e}")
         return []
 
-    repos = response.json().get("repositories", [])
-    for repo in repos:
-        logging.info(f"Repository ID: {repo['id']}, Name: {repo['name']}, "
-                     f"Namespace: {repo['namespace']}")
+    if return_headers:
+        return response.json().get("repositories", []), response.headers
+    return response.json().get("repositories", [])
 
-    total_repos = len(repos)  
+def list_repositories(base_url, username, token, pagesize, workers):
+    repos = []
+
+    print(f"Fetching count of repositories\n", end='', flush=True)
+
+    # Fetch the first page to get started
+    repos_first_page, first_response_headers = fetch_page(base_url, username,
+                                        token, pagesize, return_headers=True)
+    repos.extend(repos_first_page)
+
+    # Get the X-Resource-Count from the first request
+    total_repos_count = int(first_response_headers.get("X-Resource-Count", 0))
+
+    next_page_start = first_response_headers.get("X-Next-Page-Start")
+
+    while next_page_start:
+        page_repos, next_page_headers = fetch_page(base_url, username, token, 
+                                                   pagesize,
+                                                   page_start=next_page_start,
+                                                   return_headers=True)
+        
+        if not page_repos:
+            break  # Break if we get an empty page, indicating no more data
+
+        repos.extend(page_repos)
+        next_page_start = next_page_headers.get("X-Next-Page-Start")
+
+    # Validate fetched repos count against X-Resource-Count
+    if len(repos) != total_repos_count:
+        logging.warning(
+            f"Discrepancy detected. Expected {total_repos_count} repos, "
+            f"but fetched {len(repos)} repos."
+        )
+
+    total_repos = len(repos) 
 
     return repos, total_repos
 
@@ -135,7 +181,7 @@ def main(args):
     PAGESIZE = args.pagesize
     WORKERS = args.workers
     
-    repositories, total_repos = list_repositories(BASE_URL, USERNAME, TOKEN)
+    repositories, total_repos = list_repositories(BASE_URL, USERNAME, TOKEN, PAGESIZE, WORKERS)
 
     print(f"\nTotal number of repositories: {total_repos}")
 

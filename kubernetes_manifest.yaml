@@ -22,6 +22,19 @@ spec:
       - name: msr-storage-metrics-server
         image: msr2.konitzer.dev/wkonitzer/msr-storage-metrics-server:latest
         env:
+        - name: DOCKER_REGISTRY_URL
+          value: "https://msr.ci.mirantis.com"
+        - name: DOCKER_REGISTRY_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: msr-storage-metrics-credentials
+              key: DOCKER_REGISTRY_USERNAME
+        - name: DOCKER_REGISTRY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: msr-storage-metrics-credentials
+              key: DOCKER_REGISTRY_TOKEN                    
+# Uncomment if needed          
 #        - name: LOGGING_LEVEL
 #          value: "DEBUG"  
 #        - name: FLASK_DEBUG

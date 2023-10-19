@@ -34,7 +34,7 @@ username = os.environ['DOCKER_REGISTRY_USERNAME']
 token = os.environ['DOCKER_REGISTRY_TOKEN']
 pagesize = int(os.environ.get('DOCKER_REGISTRY_PAGESIZE', 100))
 workers = int(os.environ.get('DOCKER_REGISTRY_WORKERS', 5))
-insecure = os.environ['DOCKER_REGISTRY_INSECURE'].lower() == "true"
+insecure = os.environ.get('DOCKER_REGISTRY_INSECURE', 'false').lower() == "true"
 
 # Set up caching config
 app.config['CACHE_TYPE'] = 'simple'  # Using simple in-memory cache.

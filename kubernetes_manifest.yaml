@@ -69,6 +69,10 @@ kind: Service
 metadata:
   name: msr-storage-metrics-service
   namespace: msr-storage-metrics
+  annotations:
+    prometheus.io/scrape: 'true'
+    prometheus.io/path: '/metrics'
+    prometheus.io/port: '8000'  
 spec:
   selector:
     app: msr-storage-metrics-server

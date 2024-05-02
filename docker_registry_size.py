@@ -3,6 +3,7 @@
 import concurrent.futures
 import logging
 import sys
+import threading
 import argparse
 import signal
 import requests
@@ -20,6 +21,16 @@ HEADERS = {
 
 # Define a global flag to signal worker threads to exit
 exit_flag = False
+
+# Global lock for synchronizing access
+global_layers_lock = threading.Lock()
+
+global_layers = {}
+# global_layers = {
+#    "layerDigest1": {"size": size_in_bytes, "repositories": set([("namespace1", "repo1"), ("namespace2", "repo1")])},
+#    "layerDigest2": {"size": size_in_bytes, "repositories": set([("namespace2", "repo2")])},
+#    ...
+#}
 
 
 class FetchTagsError(Exception):
@@ -171,20 +182,47 @@ def fetch_tags_page(namespace, repo_name, base_url, username, token,
         ) from err
 
 
-def process_manifest(tag):
+def process_manifest(namespace, repo_name, tag):
     """Helper function to process a single manifest."""
     unique_layers_local = set()
     tag_size = 0
+    repo_key = (namespace, repo_name)  # Composite key
     try:
         for layer in tag['manifest']['dockerfile']:
             if layer['layerDigest'] not in unique_layers_local:
                 unique_layers_local.add(layer['layerDigest'])
                 layer_size = layer['size']
+                with global_layers_lock:
+                    if layer['layerDigest'] not in global_layers:
+                        global_layers[layer['layerDigest']] = {
+                            "size": layer['size'],
+                            "repositories": set([repo_key])
+                        }
+                    else:
+                        # Only add the repository if the layer is already known
+                        global_layers[layer['layerDigest']]["repositories"].add(repo_key)
+                # Increment tag size based on unique layers within this tag
                 tag_size += layer_size
     except KeyError:
         logging.error("Unexpected structure in server response: %s",
                         tag['manifest'])
     return unique_layers_local, tag_size
+
+
+def calculate_total_storage():
+    total_storage = sum(layer_info['size'] for layer_info in global_layers.values())
+    return total_storage
+
+
+def repository_storage(namespace, repo_name):
+    repo_key = (namespace, repo_name)
+    repo_storage = 0
+    for layer_digest, layer_info in global_layers.items():
+        if repo_key in layer_info['repositories']:
+            # Divide the layer size by the number of repositories sharing this layer
+            num_repos_sharing = len(layer_info['repositories'])
+            repo_storage += layer_info['size'] / num_repos_sharing
+    return repo_storage
 
 
 def get_tags_for_repository(namespace, repo_name, base_url, username,
@@ -262,7 +300,7 @@ def get_tags_for_repository(namespace, repo_name, base_url, username,
                                         pagesize=pagesize
                                     )
                                     for nested_tag in nested_tags:
-                                        result = process_manifest(nested_tag)
+                                        result = process_manifest(namespace, repo_name, nested_tag)
                                         tag_unique_layers = result[0]
                                         tag_size_increment = result[1]
                                         unique_layers.update(tag_unique_layers)
@@ -271,7 +309,7 @@ def get_tags_for_repository(namespace, repo_name, base_url, username,
                                     logging.error(str(error))
                         else:
                             (tag_unique_layers, 
-                             tag_size_increment) = process_manifest(tag)
+                             tag_size_increment) = process_manifest(namespace, repo_name, tag)
                             unique_layers.update(tag_unique_layers)
                             repo_total_size += tag_size_increment
 
@@ -299,23 +337,15 @@ def get_tags_for_repository(namespace, repo_name, base_url, username,
             # Handle other exceptions here if needed
             logging.error(f"An error occurred: {err}", exc_info=True)               
 
-    output.append(f"Total tags for repository {repo_name}: {total_tags}")
-    output.append(f"Total size for repository {repo_name} "
-        f"(considering unique layers): {human_readable_size(repo_total_size)}")
-
-    # Validate fetched tags count against X-Resource-Count
     if total_tags != total_tags_count:
-        warning_msg = ("WARNING: Discrepancy detected. Expected %s tags, "
-                       "but fetched %s tags." % (total_tags_count, total_tags))
-        output.append(warning_msg)
-        total_tags = "error"    
-
-    output.append("-----------------------------------------")
-
-    return repo_total_size, total_tags, "\n".join(output)
+        # Return both counts to indicate a discrepancy
+        return total_tags, (total_tags_count, total_tags)
+    else:
+        # Return None or similar if there's no discrepancy
+        return total_tags, None
 
 
-def write_to_csv(repo_details, csv_filename):
+def write_to_csv(repo_details, csv_filename, repo_filter=None):
     with open(csv_filename, 'w', newline='') as csvfile:
         fieldnames = ['Namespace', 'Repo Name', 'Tag Count', 'Size']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -323,7 +353,13 @@ def write_to_csv(repo_details, csv_filename):
         # Manually write the headers
         csvfile.write('Namespace,Repo Name,Tag Count,Size (bytes)\n')
 
+        # Filter the repo_details if a specific repo is requested
+        if repo_filter:
+            repo_details = [repo for repo in repo_details if repo['Repo Name'] == repo_filter]        
+
         for detail in repo_details:
+            # Round the size to the nearest integer
+            detail['Size'] = round(detail['Size'])          
             writer.writerow(detail)
 
 
@@ -344,9 +380,14 @@ def main(args):
     repositories, total_repos = list_repositories(BASE_URL, USERNAME, TOKEN,
                                                   PAGESIZE, WORKERS, INSECURE)
 
-    if REPO:
-        repositories = [repo for repo in repositories if repo['name'] == REPO]
-        if not repositories:
+    # Determine if we need to filter by a specific repository
+    filter_repo = REPO is not None
+    filtered_repos_count = 0  # This will track the count of filtered repositories
+
+    if filter_repo:
+        # Check if the specified repository exists and count occurrences
+        filtered_repos_count = sum(1 for repo in repositories if repo['name'] == REPO)
+        if filtered_repos_count == 0:
             logging.error(f"Error: Repository named '{REPO}' not found.")
             return    
 
@@ -357,6 +398,10 @@ def main(args):
 
     # Parallelizing the processing of each repository
     outputs = []
+    global_layer_data = {}
+    discrepancies = {}
+    repo_data = []
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as executor:
         future_to_repo = {executor.submit(get_tags_for_repository, 
                                           repo['namespace'], repo['name'],
@@ -364,9 +409,7 @@ def main(args):
                     min(10, WORKERS), INSECURE): repo for repo in repositories}
 
         for future in concurrent.futures.as_completed(future_to_repo):
-            repo_size, tag_count, repo_output = future.result()
-            overall_total_size += repo_size
-            outputs.append(repo_output)
+            total_tags, discrepancy_data = future.result()
 
             # Get the repository details from the mapping
             repo = future_to_repo[future]
@@ -375,9 +418,39 @@ def main(args):
             repo_details.append({
                 'Namespace': repo['namespace'],
                 'Repo Name': repo['name'],
-                'Tag Count': tag_count,
-                'Size': repo_size
+                'Tag Count': total_tags,
+                'Size': 0  # Temporarily set size to 0
             })
+
+            if discrepancy_data:
+                expected_tags_count, actual_tags_count = discrepancy_data
+                discrepancies[(repo['namespace'], repo['name'])] = (expected_tags_count, actual_tags_count)
+
+    for repo_detail in repo_details:
+        namespace = repo_detail['Namespace']
+        repo_name = repo_detail['Repo Name']
+        
+        # Calculate size considering shared layers
+        repo_detail['Size'] = repository_storage(namespace, repo_name)
+        unique_repo_size = repo_detail['Size']
+
+        # Construct and store the output message for this repository
+        output_message = f"Repository: {namespace}/{repo_name}...\nTotal tags for repository {repo_name}: {repo_detail['Tag Count']}\nTotal size for repository {repo_name} (considering unique layers): {human_readable_size(unique_repo_size)}"
+
+        # Check for discrepancies and append message if any
+        if (namespace, repo_name) in discrepancies:
+            expected_tags_count, actual_tags_count = discrepancies[(namespace, repo_name)]
+            discrepancy_msg = f"WARNING: Discrepancy detected. Expected {expected_tags_count} tags, but fetched {actual_tags_count} tags."
+            output_message += "\n" + discrepancy_msg
+
+        output_message += "\n-----------------------------------------"
+
+        # Append the output message based on whether we are filtering for a specific repo
+        if filter_repo:
+            if repo_name == REPO:
+                outputs.append(output_message)
+        else:
+            outputs.append(output_message)                  
 
     # Now print the outputs
     if not exit_flag:
@@ -386,10 +459,14 @@ def main(args):
             print(output)            
 
         if args.csv:
-            write_to_csv(repo_details, args.csv)
+            write_to_csv(repo_details, args.csv, repo_filter=args.repo)
 
-        print(f"\nOverall total size of all repositories: "
-              f"{human_readable_size(overall_total_size)}")
+        total_repo_size = calculate_total_storage()
+        # Sum the sizes either for all repositories or just for the specified one
+        if filter_repo:
+            total_size = sum(r['Size'] for r in repo_details if r['Repo Name'] == REPO)        
+            print(f"\nOverall total size of filtered repositories: {human_readable_size(total_size)}")
+        print(f"\nOverall total size of all repositories: {human_readable_size(total_repo_size)}")
 
 
 if __name__ == "__main__":

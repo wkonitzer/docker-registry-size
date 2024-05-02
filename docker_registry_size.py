@@ -88,7 +88,7 @@ def fetch_page(base_url, username, token, pagesize, page_start=None,
 def list_repositories(base_url, username, token, pagesize, workers, insecure):
     repos = []
 
-    print(f"Fetching count of repositories", end='', flush=True)
+    print(f"Fetching list of repositories", end='', flush=True)
 
     # Fetch the first page to get started
     repos_first_page, first_response_headers = fetch_page(base_url, username,
@@ -363,6 +363,28 @@ def write_to_csv(repo_details, csv_filename, repo_filter=None):
             writer.writerow(detail)
 
 
+def fetch_and_process_repositories(base_url, username, token, pagesize, workers, insecure):
+    repositories, total_repos = list_repositories(base_url, username, token, pagesize, workers, insecure)
+                
+    repo_details = []
+    discrepancies = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(get_tags_for_repository, repo['namespace'], repo['name'], base_url, username, token, pagesize, workers, insecure): repo for repo in repositories}
+        for future in concurrent.futures.as_completed(futures):
+            total_tags, discrepancy_data = future.result()
+            repo = futures[future]
+            if discrepancy_data:
+                discrepancies[(repo['namespace'], repo['name'])] = discrepancy_data
+            repo_details.append({
+                'Namespace': repo['namespace'],
+                'Repo Name': repo['name'],
+                'Tag Count': total_tags,
+                'Size': repository_storage(repo['namespace'], repo['name'])  # Calculate size considering shared layers
+            })
+
+    return repo_details, total_repos, discrepancies
+
+
 def main(args):
     # Use args.url, args.username, args.token inside the main function
     # Append "api/v0" and ensure there's no trailing slash
@@ -374,99 +396,48 @@ def main(args):
     REPO = args.repo
     INSECURE = args.insecure
 
-    # Initialize a list to store repository details
-    repo_details = []    
-    
-    repositories, total_repos = list_repositories(BASE_URL, USERNAME, TOKEN,
-                                                  PAGESIZE, WORKERS, INSECURE)
+    # Fetch and process all repositories
+    repo_details, total_repos, discrepancies = fetch_and_process_repositories(
+        BASE_URL, USERNAME, TOKEN, PAGESIZE, WORKERS, INSECURE)
 
-    # Determine if we need to filter by a specific repository
-    filter_repo = REPO is not None
-    filtered_repos_count = 0  # This will track the count of filtered repositories
+    # Filter repo_details if REPO is specified
+    if REPO:
+        filtered_repo_details = [repo for repo in repo_details if repo['Repo Name'] == REPO]
+        filtered_count = len(filtered_repo_details)
+        if filtered_count == 0:
+            print(f"\nError: Repository named '{REPO}' not found.")
+            return
+        print(f"\nTotal number of repositories matching '{REPO}': {filtered_count}")
+        print(f"\nTotal number of repositories: {total_repos}")
+        repo_details = filtered_repo_details
+    else:
+        print(f"\nTotal number of repositories: {total_repos}")
 
-    if filter_repo:
-        # Check if the specified repository exists and count occurrences
-        filtered_repos_count = sum(1 for repo in repositories if repo['name'] == REPO)
-        if filtered_repos_count == 0:
-            logging.error(f"Error: Repository named '{REPO}' not found.")
-            return    
+    print("-----------------------------------------")
 
-    print(f"\nTotal number of repositories: {total_repos}")
-    print("-----------------------------------------")    
-
-    overall_total_size = 0
-
-    # Parallelizing the processing of each repository
     outputs = []
-    global_layer_data = {}
-    discrepancies = {}
-    repo_data = []
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as executor:
-        future_to_repo = {executor.submit(get_tags_for_repository, 
-                                          repo['namespace'], repo['name'],
-                                          BASE_URL, USERNAME, TOKEN, PAGESIZE, 
-                    min(10, WORKERS), INSECURE): repo for repo in repositories}
-
-        for future in concurrent.futures.as_completed(future_to_repo):
-            total_tags, discrepancy_data = future.result()
-
-            # Get the repository details from the mapping
-            repo = future_to_repo[future]
-            
-            # Add repository details to the list
-            repo_details.append({
-                'Namespace': repo['namespace'],
-                'Repo Name': repo['name'],
-                'Tag Count': total_tags,
-                'Size': 0  # Temporarily set size to 0
-            })
-
-            if discrepancy_data:
-                expected_tags_count, actual_tags_count = discrepancy_data
-                discrepancies[(repo['namespace'], repo['name'])] = (expected_tags_count, actual_tags_count)
-
     for repo_detail in repo_details:
-        namespace = repo_detail['Namespace']
-        repo_name = repo_detail['Repo Name']
+        output_message = f"Repository: {repo_detail['Namespace']}/{repo_detail['Repo Name']}...\nTotal tags for repository {repo_detail['Repo Name']}: {repo_detail['Tag Count']}\nTotal size for repository {repo_detail['Repo Name']} (considering unique layers): {human_readable_size(repo_detail['Size'])}"
         
-        # Calculate size considering shared layers
-        repo_detail['Size'] = repository_storage(namespace, repo_name)
-        unique_repo_size = repo_detail['Size']
-
-        # Construct and store the output message for this repository
-        output_message = f"Repository: {namespace}/{repo_name}...\nTotal tags for repository {repo_name}: {repo_detail['Tag Count']}\nTotal size for repository {repo_name} (considering unique layers): {human_readable_size(unique_repo_size)}"
-
-        # Check for discrepancies and append message if any
-        if (namespace, repo_name) in discrepancies:
-            expected_tags_count, actual_tags_count = discrepancies[(namespace, repo_name)]
-            discrepancy_msg = f"WARNING: Discrepancy detected. Expected {expected_tags_count} tags, but fetched {actual_tags_count} tags."
-            output_message += "\n" + discrepancy_msg
-
+        if (repo_detail['Namespace'], repo_detail['Repo Name']) in discrepancies:
+            expected_tags_count, actual_tags_count = discrepancies[(repo_detail['Namespace'], repo_detail['Repo Name'])]
+            output_message += f"\nWARNING: Discrepancy detected. Expected {expected_tags_count} tags, but fetched {actual_tags_count} tags."
+        
         output_message += "\n-----------------------------------------"
+        outputs.append(output_message)
 
-        # Append the output message based on whether we are filtering for a specific repo
-        if filter_repo:
-            if repo_name == REPO:
-                outputs.append(output_message)
-        else:
-            outputs.append(output_message)                  
+    # Print filtered or all outputs
+    for output in outputs:
+        print(output)
 
-    # Now print the outputs
-    if not exit_flag:
-        print("\n-----------------------------------------") 
-        for output in outputs:
-            print(output)            
+    if args.csv:
+        write_to_csv(repo_details, args.csv, repo_filter=REPO)
 
-        if args.csv:
-            write_to_csv(repo_details, args.csv, repo_filter=args.repo)
-
-        total_repo_size = calculate_total_storage()
-        # Sum the sizes either for all repositories or just for the specified one
-        if filter_repo:
-            total_size = sum(r['Size'] for r in repo_details if r['Repo Name'] == REPO)        
-            print(f"\nOverall total size of filtered repositories: {human_readable_size(total_size)}")
-        print(f"\nOverall total size of all repositories: {human_readable_size(total_repo_size)}")
+    total_repo_size = calculate_total_storage()  # Calculate total unique storage
+    if REPO:
+        total_size = sum(r['Size'] for r in repo_details)  # repo_details already filtered if REPO is set
+        print(f"\nOverall total size of filtered repositories: {human_readable_size(total_size)}")
+    print(f"\nOverall total size of all repositories: {human_readable_size(total_repo_size)}")
 
 
 if __name__ == "__main__":

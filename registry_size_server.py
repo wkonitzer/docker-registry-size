@@ -93,8 +93,8 @@ def update_repository_metrics(repo_details):
         ).set(int(repo['count']))
 
 
-@app.route('/metrics', methods=['GET'])
-def metrics():
+@app.route('/registry_metrics', methods=['GET'])
+def metrics_endpoint():
     feed_requests.inc()
     with feed_generation_duration.time():    
         # First, get your custom metrics
@@ -109,11 +109,20 @@ def metrics():
         return Response(all_metrics, content_type="text/plain")
 
 
-@cache.cached(timeout=1200, key_prefix=metrics_cache_key)  # Use the custom cache key
 def compute_metrics():
-    # This function execution means a cache miss occurred because it had to compute the result.
-    cache_misses.inc() 
-        
+    key = metrics_cache_key()
+    metrics_data = cache.get(key)
+    if metrics_data:
+        cache_hits.inc()  # Increment cache hits here, since data is coming from cache
+        return metrics_data
+    else:
+        cache_misses.inc()  # Increment cache misses as we are about to regenerate data
+        metrics_data = generate_custom_metrics()
+        cache.set(key, metrics_data, timeout=1200)  # Cache the new metrics data
+        return metrics_data
+
+
+def generate_custom_metrics():
     repo_details, total_repo_count, _ = docker_registry_size.fetch_and_process_repositories(base_url, username, token, pagesize, workers, insecure)
 
     # Update Prometheus metrics for each repository

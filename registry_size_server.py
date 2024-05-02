@@ -2,7 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, Response
 from flask_caching import Cache
-from prometheus_client import generate_latest, REGISTRY, Gauge
+from prometheus_client import generate_latest, REGISTRY, Gauge, Counter, Histogram
 from prometheus_flask_exporter import PrometheusMetrics
 import os
 import atexit
@@ -17,7 +17,7 @@ app = Flask(__name__)
 metrics = PrometheusMetrics(app)
 
 # Expose some default metrics
-metrics.info('app_info', 'Application info', version='1.0.0')
+metrics.info('app_info', 'Application info', version='1.0.1')
 
 # Retrieve the desired logging level from an environment variable, defaulting to "INFO" if not set
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
@@ -44,18 +44,33 @@ cache = Cache(app)
 SCHEDULER_INTERVAL = int(os.environ.get('SCHEDULER_INTERVAL', 15))
 
 # Define metrics
-repository_total_size = Gauge('repository_total_size', 'Total size of a repository in bytes', ['id', 'namespace', 'name'])
-repository_total_tags = Gauge('repository_total_tags', 'Total number of tags in the repository', ['id', 'namespace', 'name'])
+repository_total_size = Gauge('repository_total_size', 'Total size of a repository in bytes', ['namespace', 'name'])
+repository_total_tags = Gauge('repository_total_tags', 'Total number of tags in the repository', ['namespace', 'name'])
 
 # New Metrics
 total_repositories = Gauge('total_repositories', 'Total number of repositories')
 total_size_all_repos = Gauge('total_size_all_repos', 'Total size of all repositories in bytes')
 
-TEST_REPOS = ["dtr", "dtr-api", "dtr-astronaut-cypress"]
+# Cache metrics
+cache_hits = Counter('cache_hits', 'Number of cache hits')
+cache_misses = Counter('cache_misses', 'Number of cache misses')
+
+# Update scheduler metrics
+update_duration = Histogram('update_duration_seconds', 'Time spent updating cache')
+update_failures = Counter('update_failures', 'Number of update failures')
+
+# Metrics generation
+feed_requests = Counter('feed_requests', 'Number of metrics requests')
+feed_generation_duration = Histogram('feed_generation_duration_seconds', 'Time spent generating metrics')
 
 
+@update_duration.time()
 def update_cache():
-    compute_metrics()
+    try:
+        compute_metrics()
+    except Exception as e:
+        update_failures.inc()
+        logging.error(f"Failed to update cache: {str(e)}")
 
 
 # Custom cache key function
@@ -63,63 +78,53 @@ def metrics_cache_key():
     return "metrics_cache_key"
 
 
-def fetch_tags_for_repo(repo):
-    delay = randint(1, 5)  # generates a random integer between 1 and 5 (inclusive)
-    sleep(delay)
-
-    try:
-        repo_total_size, total_tags, _ = docker_registry_size.get_tags_for_repository(
-            repo['namespace'], repo['name'], base_url, username, token, pagesize, workers, insecure
-        )
-
+def update_repository_metrics(repo_details):
+    for repo in repo_details:
         # Update total size metric
         repository_total_size.labels(
-            id=repo['id'],
             namespace=repo['namespace'],
             name=repo['name']
-        ).set(repo_total_size)
-
-        if total_tags == "error":
-            logging.error("Error fetching tags for repository: {}".format(repo))
-            total_tags = -1
+        ).set(int(repo['size']))
 
         # Update total tags metric
         repository_total_tags.labels(
-            id=repo['id'],
             namespace=repo['namespace'],
             name=repo['name']
-        ).set(total_tags)
+        ).set(int(repo['count']))
 
-        return repo_total_size  # Return size for aggregation
-    except Exception as e:
-        logging.error(f"Error processing repository {repo['name']}: {e}")
-        return 0  # Return 0 size for error cases
 
 @app.route('/metrics', methods=['GET'])
 def metrics():
-    # First, get your custom metrics
-    custom_metrics = compute_metrics()
+    feed_requests.inc()
+    with feed_generation_duration.time():    
+        # First, get your custom metrics
+        custom_metrics = compute_metrics()
 
-    # Then, get the Flask exporter's metrics
-    flask_exporter_metrics = generate_latest(metrics.registry)
+        # Then, get the Flask exporter's metrics
+        flask_exporter_metrics = generate_latest(metrics.registry)
 
-    # Combine both sets of metrics
-    all_metrics = custom_metrics + flask_exporter_metrics
+        # Combine both sets of metrics
+        all_metrics = custom_metrics + flask_exporter_metrics
 
-    return Response(all_metrics, content_type="text/plain")
+        return Response(all_metrics, content_type="text/plain")
 
 
 @cache.cached(timeout=1200, key_prefix=metrics_cache_key)  # Use the custom cache key
 def compute_metrics():
-    repos, total_repo_count = docker_registry_size.list_repositories(base_url, username, token, pagesize, workers, insecure)
-    #repos = [repo for repo in repos if repo['name'] in TEST_REPOS]
+    # This function execution means a cache miss occurred because it had to compute the result.
+    cache_misses.inc() 
+        
+    repo_details, total_repo_count, _ = docker_registry_size.fetch_and_process_repositories(base_url, username, token, pagesize, workers, insecure)
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        sizes = list(executor.map(fetch_tags_for_repo, repos))
+    # Update Prometheus metrics for each repository
+    update_repository_metrics(repo_details)    
+
+    # Process repository details to calculate the total size and update metrics
+    total_size = sum(repo['size'] for repo in repo_details)
 
     # Update new metrics
     total_repositories.set(total_repo_count)
-    total_size_all_repos.set(sum(sizes))
+    total_size_all_repos.set(total_size)
     return generate_latest(REGISTRY)
 
 

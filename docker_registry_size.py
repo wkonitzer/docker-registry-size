@@ -221,7 +221,7 @@ def repository_storage(namespace, repo_name):
         if repo_key in layer_info['repositories']:
             # Divide the layer size by the number of repositories sharing this layer
             num_repos_sharing = len(layer_info['repositories'])
-            repo_storage += layer_info['size'] / num_repos_sharing
+            repo_storage += round(layer_info['size'] / num_repos_sharing)
     return repo_storage
 
 
@@ -347,7 +347,7 @@ def get_tags_for_repository(namespace, repo_name, base_url, username,
 
 def write_to_csv(repo_details, csv_filename, repo_filter=None):
     with open(csv_filename, 'w', newline='') as csvfile:
-        fieldnames = ['Namespace', 'Repo Name', 'Tag Count', 'Size']
+        fieldnames = ['namespace', 'name', 'count', 'size']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
         # Manually write the headers
@@ -355,11 +355,11 @@ def write_to_csv(repo_details, csv_filename, repo_filter=None):
 
         # Filter the repo_details if a specific repo is requested
         if repo_filter:
-            repo_details = [repo for repo in repo_details if repo['Repo Name'] == repo_filter]        
+            repo_details = [repo for repo in repo_details if repo['name'] == repo_filter]        
 
         for detail in repo_details:
             # Round the size to the nearest integer
-            detail['Size'] = round(detail['Size'])          
+            detail['size'] = round(detail['size'])          
             writer.writerow(detail)
 
 
@@ -376,10 +376,10 @@ def fetch_and_process_repositories(base_url, username, token, pagesize, workers,
             if discrepancy_data:
                 discrepancies[(repo['namespace'], repo['name'])] = discrepancy_data
             repo_details.append({
-                'Namespace': repo['namespace'],
-                'Repo Name': repo['name'],
-                'Tag Count': total_tags,
-                'Size': repository_storage(repo['namespace'], repo['name'])  # Calculate size considering shared layers
+                'namespace': repo['namespace'],
+                'name': repo['name'],
+                'count': total_tags,
+                'size': repository_storage(repo['namespace'], repo['name'])  # Calculate size considering shared layers
             })
 
     return repo_details, total_repos, discrepancies
@@ -402,7 +402,7 @@ def main(args):
 
     # Filter repo_details if REPO is specified
     if REPO:
-        filtered_repo_details = [repo for repo in repo_details if repo['Repo Name'] == REPO]
+        filtered_repo_details = [repo for repo in repo_details if repo['name'] == REPO]
         filtered_count = len(filtered_repo_details)
         if filtered_count == 0:
             print(f"\nError: Repository named '{REPO}' not found.")
@@ -417,10 +417,10 @@ def main(args):
 
     outputs = []
     for repo_detail in repo_details:
-        output_message = f"Repository: {repo_detail['Namespace']}/{repo_detail['Repo Name']}...\nTotal tags for repository {repo_detail['Repo Name']}: {repo_detail['Tag Count']}\nTotal size for repository {repo_detail['Repo Name']} (considering unique layers): {human_readable_size(repo_detail['Size'])}"
+        output_message = f"Repository: {repo_detail['namespace']}/{repo_detail['name']}...\nTotal tags for repository {repo_detail['name']}: {repo_detail['count']}\nTotal size for repository {repo_detail['name']} (considering unique layers): {human_readable_size(repo_detail['size'])}"
         
-        if (repo_detail['Namespace'], repo_detail['Repo Name']) in discrepancies:
-            expected_tags_count, actual_tags_count = discrepancies[(repo_detail['Namespace'], repo_detail['Repo Name'])]
+        if (repo_detail['namespace'], repo_detail['name']) in discrepancies:
+            expected_tags_count, actual_tags_count = discrepancies[(repo_detail['namespace'], repo_detail['name'])]
             output_message += f"\nWARNING: Discrepancy detected. Expected {expected_tags_count} tags, but fetched {actual_tags_count} tags."
         
         output_message += "\n-----------------------------------------"
@@ -430,14 +430,14 @@ def main(args):
     for output in outputs:
         print(output)
 
-    if args.csv:
-        write_to_csv(repo_details, args.csv, repo_filter=REPO)
-
     total_repo_size = calculate_total_storage()  # Calculate total unique storage
     if REPO:
-        total_size = sum(r['Size'] for r in repo_details)  # repo_details already filtered if REPO is set
+        total_size = sum(r['size'] for r in repo_details)  # repo_details already filtered if REPO is set
         print(f"\nOverall total size of filtered repositories: {human_readable_size(total_size)}")
     print(f"\nOverall total size of all repositories: {human_readable_size(total_repo_size)}")
+
+    if args.csv:
+        write_to_csv(repo_details, args.csv, repo_filter=REPO)    
 
 
 if __name__ == "__main__":
